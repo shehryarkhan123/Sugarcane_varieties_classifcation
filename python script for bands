@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""
+show_bands.py — Display all bands of a satellite GeoTIFF and report their resolutions.
+
+Usage:
+    python show_bands.py /path/to/image.tif
+"""
+
+import sys
+import math
+import numpy as np
+import rasterio
+from rasterio.plot import reshape_as_image
+import matplotlib.pyplot as plt
+
+def pretty_res(transform):
+    # Pixel size (xres, yres) in dataset units (often meters)
+    xres = transform.a
+    yres = -transform.e  # usually negative in GeoTIFF
+    return (abs(xres), abs(yres))
+
+def band_name(ds, bidx):
+    # Try to get a friendly band name (e.g., Blue/Green/Red/NIR) if present
+    try:
+        ci = ds.colorinterp
+        if ci and len(ci) >= bidx:
+            return str(ci[bidx-1].name)
+    except Exception:
+        pass
+    # Fallback to description metadata or "Band N"
+    desc = ds.descriptions[bidx-1] if ds.descriptions and len(ds.descriptions) >= bidx else None
+    return desc if desc else f"Band {bidx}"
+
+def stretch(img, p_low=2, p_high=98):
+    """Percentile stretch (works on 8–16 bit)."""
+    lo, hi = np.percentile(img[np.isfinite(img)], [p_low, p_high])
+    if hi <= lo:
+        lo, hi = img.min(), img.max()
+    out = np.clip((img - lo) / (hi - lo + 1e-9), 0, 1)
+    return out
+
+def main(path):
+    with rasterio.open(path) as ds:
+        # Basic dataset info
+        xres, yres = pretty_res(ds.transform)
+        units = "dataset units"
+        # Rasterio doesn't always carry unit strings; assume meters if projected
+        if ds.crs:
+            try:
+                if ds.crs.is_projected:
+                    units = "meters"
+                elif ds.crs.is_geographic:
+                    units = "degrees"
+            except Exception:
+                pass
+
+        print(f"\nFile: {path}")
+        print(f"Size: {ds.width} x {ds.height}  |  Bands: {ds.count}")
+        print(f"CRS : {ds.crs}")
+        print(f"Pixel size: {xres:.6g} x {yres:.6g} {units}\n")
+
+        # Per-band report (dtype, nodata, description/name)
+        for b in range(1, ds.count + 1):
+            name = band_name(ds, b)
+            dtype = ds.dtypes[b-1]
+            nodata = ds.nodatavals[b-1]
+            print(f"[{b}] {name:12s}  dtype={dtype:>6s}  nodata={nodata}")
+
+        # Prepare subplot grid
+        n = ds.count
+        cols = 3 if n >= 3 else n
+        rows = math.ceil(n / cols)
+
+        fig_w = 4 * cols
+        fig_h = 3.5 * rows
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        fig.suptitle(f"All Bands — {path}\nPixel size: {xres:.3g} × {yres:.3g} {units}", fontsize=10)
+
+        for b in range(1, n + 1):
+            ax = fig.add_subplot(rows, cols, b)
+            arr = ds.read(b).astype("float32")
+
+            # Mask nodata
+            nd = ds.nodatavals[b-1]
+            if nd is not None:
+                arr = np.where(arr == nd, np.nan, arr)
+
+            # Contrast stretch & show
+            img = stretch(arr)
+            im = ax.imshow(img)  # default colormap (viridis); don't force colors
+            ax.set_title(f"{b}: {band_name(ds, b)}", fontsize=9)
+            ax.axis("off")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.show()
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python show_bands.py /path/to/image.tif")
+        sys.exit(1)
+    main(sys.argv[1])
